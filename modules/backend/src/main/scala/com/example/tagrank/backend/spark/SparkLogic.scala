@@ -99,13 +99,40 @@ object SparkLogic {
         status.getText
       }
 
-    // ストリームの塊を処理する
-    tweetStream.foreachRDD { rdd: RDD[String] =>
+    // 日本語を含むツイートを抽出
+    val japaneseTweetStream: DStream[String] =
+      tweetStream.filter(containsJapaneseChar)
 
-        // Ranking に変換する RDD
-        val rankingsRDD = rdd map { tweet: String =>
-            // String を Ranking ケースクラスに変換
-            Ranking("#hashTag", rank = 1, Array(tweet), sampleCount = 1)
+    // ハッシュタグとツイートのペアを作る
+    val hashTagTweetPairStream: DStream[(String, String)] =
+      for {
+        tweet   <- japaneseTweetStream
+        hashTag <- pickHashTags(tweet)
+      } yield (hashTag, tweet)
+
+    // ペアの1番目をキーとしてツイートのグループを作る
+    // 過去2分間のツイートを1秒ごとに集計 ⇒ window: 2分 と slide: 1秒 を指定
+    val hashTagGroupsStream: DStream[(String, Iterable[String])] =
+      hashTagTweetPairStream.groupByKeyAndWindow(Minutes(2), Seconds(1))
+
+    // ストリームの塊を処理する
+    hashTagGroupsStream.foreachRDD { rdd: RDD[(String, Iterable[String])] =>
+
+      // ツイートの数でソート
+      val sortedHashTagGroupsRDD: RDD[(String, Iterable[String])] =
+        rdd.sortBy({ case (_, tweets) =>
+          tweets.size
+        }, ascending = false)
+
+      // ソートされた各要素にインデックスを付ける
+      val rankedHashTagGroupsRDD: RDD[((String, Iterable[String]), Long)] =
+        sortedHashTagGroupsRDD.zipWithIndex()
+
+        // Ranking に変換
+        val rankingsRDD = rankedHashTagGroupsRDD map {
+          case ((hashTag, tweets), index) =>
+            // index は 0 開始 なので + 1 しておく
+            Ranking(hashTag, rank = index + 1, tweets.toArray, sampleCount = tweets.size)
         }
 
         // collect() を呼び出すことによって実際の RDD の処理が始まる
